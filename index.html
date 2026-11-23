@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Punto de Venta - BY ARI</title>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f9; }
+    .contenedor { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .fila-buscar { display: flex; gap: 10px; margin-bottom: 15px; }
+    input[type="text"] { flex: 1; padding: 12px; font-size: 16px; box-sizing: border-box; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 15px; }
+    th, td { border-bottom: 1px solid #ddd; padding: 10px; text-align: left; }
+    .total { font-size: 24px; font-weight: bold; text-align: right; margin-bottom: 15px; }
+    button { padding: 14px 18px; font-size: 16px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; }
+    .btn-buscar { background: #334155; white-space: nowrap; }
+    .btn-full { width: 100%; }
+    button:disabled { background: #ccc; }
+    #estado { font-size: 13px; color: #555; margin-bottom: 10px; }
+
+    #ticket { display: none; }
+    @media print {
+      body * { visibility: hidden; }
+      #ticket, #ticket * { visibility: visible; }
+      #ticket {
+        display: block;
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 80mm;
+        font-family: monospace;
+        font-size: 12px;
+      }
+      @page { margin: 0; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="contenedor">
+  <h2>Punto de Venta - BY ARI</h2>
+  <div id="estado">Cargando catálogo...</div>
+
+  <div class="fila-buscar">
+    <input type="text" id="lector" placeholder="Código de barras o nombre del producto..." autofocus>
+    <button type="button" class="btn-buscar" onclick="ejecutarBusqueda()">🔍 Buscar</button>
+  </div>
+
+  <button type="button" id="btn-camara" class="btn-full" onclick="toggleCamara()" style="background:#007bff; margin-bottom:15px;">
+    📷 Escanear con Cámara
+  </button>
+  <div id="reader" style="width: 100%; max-width: 460px; margin: 0 auto 15px auto; display: none;"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Producto</th>
+        <th>Cant.</th>
+        <th>Precio</th>
+        <th>Subtotal</th>
+      </tr>
+    </thead>
+    <tbody id="tabla-carrito"></tbody>
+  </table>
+
+  <div class="total">Total: $<span id="total">0.00</span></div>
+  <button id="btn-cobrar" class="btn-full" onclick="cobrar()">Cobrar e Imprimir Ticket</button>
+</div>
+
+<div id="ticket">
+  <h3 style="text-align:center; margin:0;">BY ARI</h3>
+  <p id="ticket-folio" style="text-align:center; margin:5px 0;"></p>
+  <hr>
+  <div id="ticket-items"></div>
+  <hr>
+  <p id="ticket-total" style="text-align:right; font-weight:bold;"></p>
+  <p style="text-align:center;">¡Gracias por su compra!</p>
+</div>
+
+<script>
+  const API_URL = 'https://script.google.com/macros/s/AKfycbyCY_jh0U330ncniIrOejPRcEUAx5jCI2sTKIn8Rcsoi9o78K9T5wQaC2Tab3nAChHY0A/exec';
+
+  let inventario = [];
+  let carrito = [];
+  let html5QrCode = null;
+  let camaraActiva = false;
+  let bloqueado = false;
+
+  window.onload = async function() {
+    await cargarInventario();
+  };
+
+  async function cargarInventario() {
+    const estado = document.getElementById('estado');
+    try {
+      const res = await fetch(API_URL);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'No se pudieron cargar productos');
+      inventario = data.productos;
+      estado.innerText = `Catálogo sincronizado (${inventario.length} productos)`;
+    } catch (err) {
+      estado.innerText = 'Error al conectar con Google Sheets: ' + err.message;
+    }
+  }
+
+  document.getElementById('lector').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      ejecutarBusqueda();
+    }
+  });
+
+  function ejecutarBusqueda() {
+    const input = document.getElementById('lector');
+    const texto = input.value.trim();
+    if (!texto) return;
+    input.value = '';
+    buscarYAgregar(texto);
+    input.focus();
+  }
+
+  async function toggleCamara() {
+    const readerDiv = document.getElementById('reader');
+    const btn = document.getElementById('btn-camara');
+
+    if (!camaraActiva) {
+      readerDiv.style.display = 'block';
+      readerDiv.innerHTML = '<p style="text-align:center; color:#555;">Solicitando permiso de cámara...</p>';
+      btn.innerText = '❌ Cerrar Cámara';
+      btn.style.background = '#dc3545';
+
+      try {
+        const cameras = await Html5Qrcode.getCameras();
+        if (!cameras || cameras.length === 0) {
+          throw new Error('No se detectó ninguna cámara.');
+        }
+        const trasera = cameras.find(c => /back|rear|environment|trasera/i.test(c.label));
+        const cameraId = trasera ? trasera.id : cameras[0].id;
+
+        readerDiv.innerHTML = '';
+
+        const formatsToSupport = typeof Html5QrcodeSupportedFormats !== 'undefined' ? [
+          Html5QrcodeSupportedFormats.EAN_13,
+          Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.UPC_A,
+          Html5QrcodeSupportedFormats.UPC_E,
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.QR_CODE
+        ] : undefined;
+
+        html5QrCode = new Html5Qrcode("reader", formatsToSupport ? { formatsToSupport } : undefined);
+
+        await html5QrCode.start(
+          cameraId,
+          {
+            fps: 12,
+            qrbox: { width: 320, height: 140 },
+            experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+          },
+          (codigoLeido) => {
+            if (bloqueado) return;
+            bloqueado = true;
+            buscarYAgregar(codigoLeido.trim());
+            setTimeout(() => { bloqueado = false; }, 1500);
+          },
+          () => {}
+        );
+        camaraActiva = true;
+      } catch (err) {
+        readerDiv.innerHTML = `<div style="background:#f8d7da; color:#842029; padding:10px; border-radius:5px;">
+          <strong>Error de cámara:</strong> ${err.message || err}
+        </div>`;
+        btn.innerText = '📷 Escanear con Cámara';
+        btn.style.background = '#007bff';
+        camaraActiva = false;
+      }
+    } else {
+      if (html5QrCode) {
+        await html5QrCode.stop().catch(() => {});
+        await html5QrCode.clear().catch(() => {});
+      }
+      readerDiv.style.display = 'none';
+      readerDiv.innerHTML = '';
+      btn.innerText = '📷 Escanear con Cámara';
+      btn.style.background = '#007bff';
+      camaraActiva = false;
+    }
+  }
+
+  function buscarYAgregar(consulta) {
+    const q = String(consulta).trim().toLowerCase();
+    let prod = inventario.find(p => String(p.codigo).trim().toLowerCase() === q);
+    if (!prod) {
+      prod = inventario.find(p => String(p.nombre).toLowerCase().includes(q));
+    }
+
+    if (!prod) {
+      alert('Producto no encontrado: ' + consulta);
+      return;
+    }
+
+    const enCarrito = carrito.find(c => c.codigo === prod.codigo);
+    if (enCarrito) {
+      enCarrito.cantidad++;
+    } else {
+      carrito.push({ ...prod, cantidad: 1 });
+    }
+    renderizarCarrito();
+  }
+
+  function renderizarCarrito() {
+    const tbody = document.getElementById('tabla-carrito');
+    tbody.innerHTML = '';
+    let total = 0;
+
+    carrito.forEach(item => {
+      const sub = item.precio * item.cantidad;
+      total += sub;
+      tbody.innerHTML += `<tr>
+        <td>${item.nombre}</td>
+        <td>${item.cantidad}</td>
+        <td>$${item.precio.toFixed(2)}</td>
+        <td>$${sub.toFixed(2)}</td>
+      </tr>`;
+    });
+    document.getElementById('total').innerText = total.toFixed(2);
+  }
+
+  async function cobrar() {
+    if (carrito.length === 0) return;
+    const btn = document.getElementById('btn-cobrar');
+    btn.disabled = true;
+    btn.innerText = 'Guardando...';
+
+    const total = Number(document.getElementById('total').innerText);
+    const ventaActual = [...carrito];
+
+    try {
+      const res = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ carrito: ventaActual, total: total })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'No se pudo registrar la venta');
+
+      imprimirTicket(data.folio, total, ventaActual);
+      carrito = [];
+      renderizarCarrito();
+      await cargarInventario();
+      document.getElementById('lector').focus();
+    } catch (err) {
+      alert('Error al cobrar: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerText = 'Cobrar e Imprimir Ticket';
+    }
+  }
+
+  function imprimirTicket(folio, total, items) {
+    document.getElementById('ticket-folio').innerText = 'Folio: ' + folio + ' | ' + new Date().toLocaleString();
+    document.getElementById('ticket-items').innerHTML = items.map(i =>
+      `<div>${i.cantidad}x ${i.nombre} - $${(i.precio * i.cantidad).toFixed(2)}</div>`
+    ).join('');
+    document.getElementById('ticket-total').innerText = 'TOTAL: $' + total.toFixed(2);
+    window.print();
+  }
+</script>
+</body>
+</html>
